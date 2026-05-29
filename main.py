@@ -24,11 +24,11 @@ if not BOT_TOKEN:
 CONTACT, Q1, Q2, Q3, Q4, Q5 = range(6)
 
 QUESTIONS = [
-    '📊 Вопрос 1: План найма за год, чел.\n(Например: 50)',
-    '💵 Вопрос 2: Средняя зарплата, ₽/мес с налогами\n(Например: 120000)',
-    '⏳ Вопрос 3: Длительность испытательного срока (мес)\n(Например: 3)',
-    '🎓 Вопрос 4: Стоимость найма и обучения одного сотрудника, ₽\n(Например: 50000)',
-    '📉 Вопрос 5: Текущая доля увольнений на испытательном сроке, %\n(Например: 27)'
+    '━━━━━━━━━━━━━━━\n\n📌 Вопрос 1 из 5\n\n📈 Сколько сотрудников вы планируете нанять в ближайшие 12 месяцев?\n\nПример ответа:\n50',
+    '━━━━━━━━━━━━━━━\n\n📌 Вопрос 2 из 5\n\n💰 Какая средняя зарплата сотрудника в месяц?\n(Укажите сумму с налогами)\n\nПример ответа:\n120000',
+    '━━━━━━━━━━━━━━━\n\n📌 Вопрос 3 из 5\n\n⏳ Сколько длится испытательный срок?\n(в месяцах)\n\nПример ответа:\n3',
+    '━━━━━━━━━━━━━━━\n\n📌 Вопрос 4 из 5\n\n🎯 Сколько в среднем стоит найм и адаптация одного сотрудника?\n(поиск, HR, онбординг, обучение)\n\nПример ответа:\n50000',
+    '━━━━━━━━━━━━━━━\n\n📌 Вопрос 5 из 5\n\n📉 Какой процент сотрудников увольняется во время испытательного срока?\n\nПример ответа:\n27%'
 ]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -37,8 +37,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     reply_markup = ReplyKeyboardMarkup(custom_keyboard, resize_keyboard=True, one_time_keyboard=True)
 
     await update.message.reply_text(
-        '1. Мы талент майнд, бот для расчёта стоимости средней ошибки найма, основанный на статистике в РФ.\n'
-        'Ответьте на несколько вопросов и получите свод информации по рынку.\n\n'
+        '👋 Добро пожаловать в Talent Mind\n\n'
+        'Пройдите короткий опрос из 5 вопросов — и получите персональную HR-аналитику:\n\n'
+        '📊 сколько компания теряет на ошибках найма\n'
+        '💸 потенциальную экономию бюджета\n'
+        '📈 сводную аналитику по эффективности найма\n\n'
+        'Это займет не более 2 минут.\n\n'
         'Для начала, пожалуйста, поделитесь своим контактом, нажав на кнопку ниже.',
         reply_markup=reply_markup
     )
@@ -55,7 +59,7 @@ async def process_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data['last_name'] = contact.last_name or ''
 
     await update.message.reply_text(
-        f'Спасибо, {contact.first_name}! Теперь ответьте на 5 коротких вопросов.\n\n{QUESTIONS[0]}',
+        f'Спасибо, {contact.first_name}!\n\n{QUESTIONS[0]}',
         reply_markup=ReplyKeyboardRemove()
     )
     return Q1
@@ -84,7 +88,7 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q5_answer = update.message.text
     context.user_data['q5'] = q5_answer
     
-    await update.message.reply_text('⏳ Считаем результаты...')
+    await update.message.reply_text('━━━━━━━━━━━━━━━\n\n⏳ Отлично! Анализируем данные...')
 
     def parse_float(val):
         try:
@@ -116,17 +120,16 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return f'{num:,.0f}'.replace(',', ' ')
 
     result_text = (
-        f'✨ <b>АНАЛИТИЧЕСКИЙ ОТЧЁТ</b> ✨\n\n'
-        f'👤 <b>Цена ошибки на 1 сотрудника:</b>\n'
-        f'💸 <code>{fmt(cost_mistake_rub)} ₽</code>\n\n'
-        f'📉 <b>Ваши годовые затраты «сейчас»:</b>\n'
-        f'🔥 <code>{fmt(cost_now_rub)} ₽</code>\n\n'
-        f'✅ <b>Годовые затраты «после внедрения Talent Mind»:</b>\n'
-        f'🛡 <code>{fmt(cost_after_rub)} ₽</code>\n\n'
-        f'➖➖➖➖➖➖➖➖➖➖\n'
-        f'💰 <b>ВАША ЧИСТАЯ ЭКОНОМИЯ:</b>\n'
-        f'❇️ <b>{fmt(savings_rub)} ₽</b> <i>(снижение на {savings_pct:,.0f}%)</i>\n'
-        f'➖➖➖➖➖➖➖➖➖➖'
+        f'📊 <b>Ваша персональная HR-аналитика:</b>\n\n'
+        f'💸 <b>Стоимость одной ошибки найма:</b>\n'
+        f'{fmt(cost_mistake_rub)} ₽\n\n'
+        f'📉 <b>Текущие годовые потери компании:</b>\n'
+        f'{fmt(cost_now_rub)} ₽\n\n'
+        f'✅ <b>Потери после внедрения Talent Mind:</b>\n'
+        f'{fmt(cost_after_rub)} ₽\n\n'
+        f'💰 <b>Потенциальная экономия:</b>\n'
+        f'{fmt(savings_rub)} ₽ в год\n\n'
+        f'━━━━━━━━━━━━━━━'
     )
 
     await update.message.reply_text(result_text, parse_mode='HTML')
@@ -148,7 +151,13 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     try:
         await append_row(GOOGLE_CREDENTIALS_FILE, SPREADSHEET_URL, row_data)
-        await update.message.reply_text('🎉 <b>Отлично!</b> Ваши данные успешно сохранены, вы стали участником розыгрыша от Talent Mind! Желаем удачи! 🍀', parse_mode='HTML')
+        await update.message.reply_text(
+            '🎉 <b>Спасибо!</b>\n\n'
+            'Ваши данные успешно сохранены.\n'
+            '📩 Свод аналитики будет отправлена вам после обработки результатов.\n\n'
+            '🍀 Также вы стали участником розыгрыша от Talent Mind',
+            parse_mode='HTML'
+        )
     except Exception as e:
         import traceback
         logging.error(f'Ошибка при записи в Google табличку: {e}')
