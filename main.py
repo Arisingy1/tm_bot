@@ -1,0 +1,187 @@
+import asyncio
+import logging
+import os
+import re
+from dotenv import load_dotenv
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from gsheets import append_row
+
+load_dotenv(override=True)
+
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+GOOGLE_CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
+SPREADSHEET_URL = os.getenv('SPREADSHEET_URL')
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+if not BOT_TOKEN:
+    exit('Ошибка: Не указан BOT_TOKEN в .env файле')
+
+CONTACT, Q1, Q2, Q3, Q4, Q5 = range(6)
+
+QUESTIONS = [
+    '📊 Вопрос 1: План найма за год, чел.\n(Например: 50)',
+    '💵 Вопрос 2: Средняя зарплата, ₽/мес с налогами\n(Например: 120000)',
+    '⏳ Вопрос 3: Длительность испытательного срока (мес)\n(Например: 3)',
+    '🎓 Вопрос 4: Стоимость найма и обучения одного сотрудника, ₽\n(Например: 50000)',
+    '📉 Вопрос 5: Текущая доля увольнений на испытательном сроке, %\n(Например: 27)'
+]
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contact_button = KeyboardButton(text='📱 Поделиться контактом', request_contact=True)
+    custom_keyboard = [[contact_button]]
+    reply_markup = ReplyKeyboardMarkup(custom_keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+    await update.message.reply_text(
+        '1. Мы талент майнд, бот для расчёта стоимости средней ошибки найма, основанный на статистике в РФ.\n'
+        'Ответьте на несколько вопросов и получите свод информации по рынку.\n\n'
+        'Для начала, пожалуйста, поделитесь своим контактом, нажав на кнопку ниже.',
+        reply_markup=reply_markup
+    )
+    return CONTACT
+
+async def process_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contact = update.message.contact
+    if not contact:
+        await update.message.reply_text('Пожалуйста, используйте кнопку для отправки контакта.')
+        return CONTACT
+        
+    context.user_data['phone'] = contact.phone_number
+    context.user_data['first_name'] = contact.first_name
+    context.user_data['last_name'] = contact.last_name or ''
+
+    await update.message.reply_text(
+        f'Спасибо, {contact.first_name}! Теперь ответьте на 5 коротких вопросов.\n\n{QUESTIONS[0]}',
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return Q1
+
+async def process_q1(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['q1'] = update.message.text
+    await update.message.reply_text(QUESTIONS[1])
+    return Q2
+
+async def process_q2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['q2'] = update.message.text
+    await update.message.reply_text(QUESTIONS[2])
+    return Q3
+
+async def process_q3(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['q3'] = update.message.text
+    await update.message.reply_text(QUESTIONS[3])
+    return Q4
+
+async def process_q4(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['q4'] = update.message.text
+    await update.message.reply_text(QUESTIONS[4])
+    return Q5
+
+async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q5_answer = update.message.text
+    context.user_data['q5'] = q5_answer
+    
+    await update.message.reply_text('⏳ Считаем результаты...')
+
+    def parse_float(val):
+        try:
+            val = val.replace(',', '.').replace(' ', '').replace(' ', '').strip()
+            # Извлекаем первое попавшееся число из строки
+            import re
+            m = re.search(r'\d+(?:\.\d+)?', val)
+            if m:
+                return float(m.group(0))
+            return 0.0
+        except:
+            return 0.0
+
+    plan = parse_float(context.user_data.get('q1', '0'))
+    salary_rub = parse_float(context.user_data.get('q2', '0'))
+    probation = parse_float(context.user_data.get('q3', '0'))
+    hiring_cost_rub = parse_float(context.user_data.get('q4', '0'))
+    turnover_rate = parse_float(context.user_data.get('q5', '0'))
+
+    # Расчёты
+    cost_mistake_rub = (salary_rub * probation) + hiring_cost_rub
+    cost_now_rub = plan * (turnover_rate / 100.0) * cost_mistake_rub
+    cost_after_rub = plan * ((turnover_rate / 100.0) * 0.70) * cost_mistake_rub
+    savings_rub = cost_now_rub - cost_after_rub
+    savings_pct = 30.0 if cost_now_rub > 0 else 0.0
+
+    # Форматирование чисел
+    def fmt(num):
+        return f'{num:,.0f}'.replace(',', ' ')
+
+    result_text = (
+        f'✨ <b>АНАЛИТИЧЕСКИЙ ОТЧЁТ</b> ✨\n\n'
+        f'👤 <b>Цена ошибки на 1 сотрудника:</b>\n'
+        f'💸 <code>{fmt(cost_mistake_rub)} ₽</code>\n\n'
+        f'📉 <b>Ваши годовые затраты «сейчас»:</b>\n'
+        f'🔥 <code>{fmt(cost_now_rub)} ₽</code>\n\n'
+        f'✅ <b>Годовые затраты «после внедрения Talent Mind»:</b>\n'
+        f'🛡 <code>{fmt(cost_after_rub)} ₽</code>\n\n'
+        f'➖➖➖➖➖➖➖➖➖➖\n'
+        f'💰 <b>ВАША ЧИСТАЯ ЭКОНОМИЯ:</b>\n'
+        f'❇️ <b>{fmt(savings_rub)} ₽</b> <i>(снижение на {savings_pct:,.0f}%)</i>\n'
+        f'➖➖➖➖➖➖➖➖➖➖'
+    )
+
+    await update.message.reply_text(result_text, parse_mode='HTML')
+
+    row_data = [
+        context.user_data.get('phone'),
+        context.user_data.get('first_name'),
+        context.user_data.get('last_name'),
+        context.user_data.get('q1'),
+        context.user_data.get('q2'),
+        context.user_data.get('q3'),
+        context.user_data.get('q4'),
+        context.user_data.get('q5'),
+        cost_mistake_rub,
+        cost_now_rub,
+        cost_after_rub,
+        savings_rub
+    ]
+
+    try:
+        await append_row(GOOGLE_CREDENTIALS_FILE, SPREADSHEET_URL, row_data)
+        await update.message.reply_text('🎉 <b>Отлично!</b> Ваши данные успешно сохранены, вы стали участником розыгрыша от Talent Mind! Желаем удачи! 🍀', parse_mode='HTML')
+    except Exception as e:
+        import traceback
+        logging.error(f'Ошибка при записи в Google табличку: {e}')
+        logging.error(traceback.format_exc())
+        await update.message.reply_text('Произошла ошибка при сохранении в Google Таблицу.')
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text('Опрос отменен.', reply_markup=ReplyKeyboardRemove())
+    context.user_data.clear()
+    return ConversationHandler.END
+
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            CONTACT: [MessageHandler(filters.CONTACT, process_contact),
+                      MessageHandler(filters.TEXT & ~filters.COMMAND, process_contact)],
+            Q1: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q1)],
+            Q2: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q2)],
+            Q3: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q3)],
+            Q4: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q4)],
+            Q5: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q5)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    app.add_handler(conv_handler)
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
