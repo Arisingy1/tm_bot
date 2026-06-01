@@ -144,6 +144,12 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     with open('слайд.png', 'rb') as photo:
         await update.message.reply_photo(photo=photo, caption=result_text, parse_mode='HTML')
 
+    try:
+        with open('HR-СТАТИСТИКА.pdf', 'rb') as pdf:
+            await update.message.reply_document(document=pdf)
+    except Exception as e:
+        logging.error(f'Ошибка отправки PDF: {e}')
+
     row_data = [
         context.user_data.get('phone'),
         context.user_data.get('first_name'),
