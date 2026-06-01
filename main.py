@@ -32,7 +32,24 @@ QUESTIONS = [
     '📌 Вопрос 5 из 5\n\n📉 Какой процент сотрудников увольняется во время испытательного срока?\n\nПример ответа:\n27%'
 ]
 
+COMPLETED_USERS_FILE = 'completed_users.txt'
+
+def has_user_completed(user_id):
+    if not os.path.exists(COMPLETED_USERS_FILE):
+        return False
+    with open(COMPLETED_USERS_FILE, 'r') as f:
+        completed = set(line.strip() for line in f)
+    return str(user_id) in completed
+
+def mark_user_completed(user_id):
+    with open(COMPLETED_USERS_FILE, 'a') as f:
+        f.write(f'{user_id}\n')
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if has_user_completed(update.message.from_user.id):
+        await update.message.reply_text('👋 Вы уже прошли этот опрос. Спасибо за участие!')
+        return ConversationHandler.END
+
     contact_button = KeyboardButton(text='📱 Поделиться контактом', request_contact=True)
     custom_keyboard = [[contact_button]]
     reply_markup = ReplyKeyboardMarkup(custom_keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -167,11 +184,15 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     try:
         await append_row(GOOGLE_CREDENTIALS_FILE, SPREADSHEET_URL, row_data)
+        mark_user_completed(update.message.from_user.id)
         await update.message.reply_text(
             '🎉 <b>Спасибо!</b>\n\n'
             'Ваши данные успешно сохранены.\n'
-            '📩 Свод аналитики будет отправлена вам после обработки результатов.\n\n'
-            '🍀 Также вы стали участником розыгрыша от TalentMind',
+            '🍀 <b>Вы стали участником розыгрыша от TalentMind!</b>\n\n'
+            '📌 <b>Условия участия:</b>\n'
+            '• Быть подписанным на Telegram-канал TalentMind\n'
+            '• Указать корректные контакты\n'
+            'Победители будут определены случайным образом, результаты опубликуем в канале. Удачи!',
             parse_mode='HTML'
         )
     except Exception as e:
