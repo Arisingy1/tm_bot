@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+from turtle import update
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -37,11 +38,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     reply_markup = ReplyKeyboardMarkup(custom_keyboard, resize_keyboard=True, one_time_keyboard=True)
 
     await update.message.reply_text(
-        '👋 Добро пожаловать в Talent Mind\n\n'
-        'Пройдите короткий опрос из 5 вопросов — и получите персональную HR-аналитику:\n\n'
-        '📊 сколько компания теряет на ошибках найма\n'
-        '💸 потенциальную экономию бюджета\n'
-        '📈 сводную аналитику по эффективности найма\n\n'
+        '👋 Добро пожаловать в TalentMind!\n\n'
+        'Пройдите короткий опрос из 5 вопросов и получите:\n\n'
+        '📊 расчет потерь вашей компании от ошибок найма\n'
+        '📈 сводную HR-аналитику в среднем по рынку\n'
+        '🎁 участие в нашем розыгрыше!\n\n'
         'Это займет не более 2 минут.\n\n'
         'Для начала, пожалуйста, поделитесь своим контактом, нажав на кнопку ниже.',
         reply_markup=reply_markup
@@ -88,7 +89,7 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q5_answer = update.message.text
     context.user_data['q5'] = q5_answer
     
-    await update.message.reply_text('━━━━━━━━━━━━━━━\n\n⏳ Отлично! Анализируем данные...')
+    processing_msg = await update.message.reply_text('⏳ Отлично! Анализируем данные...')
 
     def parse_float(val):
         try:
@@ -135,7 +136,13 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f'<i>что {comp_now} на {comp_now_pct:.0f}% чем среднее рыночное значение</i>\n\n'
     )
 
-    await update.message.reply_text(result_text, parse_mode='HTML')
+    try:
+        await processing_msg.delete()
+    except Exception:
+        pass
+
+    with open('слайд.png', 'rb') as photo:
+        await update.message.reply_photo(photo=photo, caption=result_text, parse_mode='HTML')
 
     row_data = [
         context.user_data.get('phone'),
@@ -158,7 +165,7 @@ async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             '🎉 <b>Спасибо!</b>\n\n'
             'Ваши данные успешно сохранены.\n'
             '📩 Свод аналитики будет отправлена вам после обработки результатов.\n\n'
-            '🍀 Также вы стали участником розыгрыша от Talent Mind',
+            '🍀 Также вы стали участником розыгрыша от TalentMind',
             parse_mode='HTML'
         )
     except Exception as e:
