@@ -1,11 +1,24 @@
-import asyncio
 import logging
 import os
 import re
-from turtle import update
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ConversationHandler,
+)
 from gsheets import append_row
 
 load_dotenv(override=True)
@@ -14,25 +27,146 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 GOOGLE_CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 SPREADSHEET_URL = os.getenv('SPREADSHEET_URL')
 
+# --- Геймификация / конфигурация ---
+POINTS_PER_CORRECT = 20
+POINTS_FOR_SUBSCRIPTION = 50
+WINNING_THRESHOLD = 110
+
+# Канал для проверки подписки (бот должен быть админом канала)
+CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', '@talentmind')   # для getChatMember
+CHANNEL_URL = os.getenv('CHANNEL_URL', 'https://t.me/talentmind')  # ссылка-кнопка «Подписаться»
+
+# Финальные материалы
+CALCULATOR_URL = os.getenv('CALCULATOR_URL', 'https://talentmind.ru/calculator')
+BROCHURE_FILE = os.getenv('BROCHURE_FILE', 'HR-СТАТИСТИКА.pdf')
+EVENT_INFO = os.getenv('EVENT_INFO', '19 июня в 15:00 на стенде TalentMind')
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN:
     exit('Ошибка: Не указан BOT_TOKEN в .env файле')
 
-CONTACT, Q1, Q2, Q3, Q4, Q5 = range(6)
+# Состояния диалога
+QUIZ, SUBSCRIBE, CONTACT, EMAIL = range(4)
 
-QUESTIONS = [
-    '📌 Вопрос 1 из 5\n\n📈 Сколько сотрудников вы планируете нанять в ближайшие 12 месяцев?\n\nПример ответа:\n50',
-    '📌 Вопрос 2 из 5\n\n💰 Какая средняя зарплата сотрудника в месяц?\n(Укажите сумму с налогами)\n\nПример ответа:\n120000',
-    '📌 Вопрос 3 из 5\n\n⏳ Сколько длится испытательный срок?\n(в месяцах)\n\nПример ответа:\n3',
-    '📌 Вопрос 4 из 5\n\n🎯 Сколько в среднем стоит найм и адаптация одного сотрудника?\n(поиск, HR, онбординг, обучение)\n\nПример ответа:\n50000',
-    '📌 Вопрос 5 из 5\n\n📉 Какой процент сотрудников увольняется во время испытательного срока?\n\nПример ответа:\n27%'
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+EMAIL_BUTTON_TEXT = '✉️ Указать email вместо этого'
+
+QUIZ_QUESTIONS = [
+    {
+        'title': 'Вопрос 1. Soft skills в эпоху автоматизации',
+        'text': (
+            'По данным Всемирного экономического форума (Future of Jobs Report), '
+            'какая доля существующих навыков работников к 2029 году потребует обновления '
+            'или замены в связи с развитием технологий?'
+        ),
+        'options': [
+            'Около 10% — автоматизация затронет только узкоспециализированные профессии',
+            'Около 25% — преимущественно рутинные физические операции',
+            'Около 44% — включая значительную часть когнитивных задач',
+            'Более 80% — большинство профессий исчезнет в течение 5 лет',
+        ],
+        'correct': 2,
+        'explanation': (
+            'Автоматизация затрагивает не только физический труд, но и рутинные когнитивные задачи. '
+            'На этом фоне soft skills — адаптивность, критическое мышление, эмоциональный интеллект — '
+            'становятся главным конкурентным преимуществом сотрудника. Это меняет приоритеты при найме: '
+            'оценивать нужно не только то, что человек умеет сегодня, но и его способность меняться.'
+        ),
+        'next_label': 'Следующий вопрос ▶️',
+    },
+    {
+        'title': 'Вопрос 2. Стоимость найма',
+        'text': (
+            'По данным Society for Human Resource Management (SHRM), во сколько обходится компании '
+            'замена одного сотрудника, если выразить это в процентах от его годового дохода?'
+        ),
+        'options': [
+            'Около 5–10% — преимущественно расходы на публикацию вакансии',
+            'Около 15–20% — стоимость услуг рекрутингового агентства',
+            'От 50% до 200% годового дохода сотрудника — в зависимости от уровня позиции',
+            'Более 500% — замена любого сотрудника катастрофически дорога',
+        ],
+        'correct': 2,
+        'explanation': (
+            'Полная стоимость замены сотрудника составляет 50–200% его годовой зарплаты. Для линейного '
+            'персонала это ближе к нижней границе, для менеджеров и экспертов — к верхней. В расчёт входят: '
+            'прямые затраты на поиск, потеря производительности во время вакансии, время коллег на адаптацию '
+            'нового человека и период выхода на плановую эффективность (обычно 3–6 месяцев).'
+        ),
+        'next_label': 'Следующий вопрос ▶️',
+    },
+    {
+        'title': 'Вопрос 3. Тихое увольнение',
+        'text': (
+            'Согласно исследованию Gallup 2024 года, какая доля сотрудников в мире относится к категории '
+            '«тихих увольняющихся» — людей, которые формально выполняют свои обязанности, но не прикладывают '
+            'дополнительных усилий?'
+        ),
+        'options': [
+            'Около 10% — это маргинальное явление, преувеличенное медиа',
+            'Около 25% — примерно каждый четвёртый',
+            'Около 50% — половина глобальной рабочей силы',
+            'Более 80% — подавляющее большинство сотрудников',
+        ],
+        'correct': 2,
+        'explanation': (
+            'Gallup фиксирует, что 50% сотрудников глобально находятся в состоянии «тихого увольнения». '
+            'Ещё 17% — «активно отстранённые», которые могут негативно влиять на коллег. Это означает, что '
+            'культурное соответствие и мотивационный профиль кандидата при найме критически важны.'
+        ),
+        'next_label': 'Квиз на 60% пройден. Продолжим ▶️',
+    },
+    {
+        'title': 'Вопрос 4. Когнитивные искажения при найме',
+        'text': (
+            'Согласно исследованиям, какой из перечисленных когнитивных эффектов наиболее часто приводит '
+            'к тому, что интервьюеры отдают предпочтение кандидатам, похожим на них самих?'
+        ),
+        'options': [
+            'Эффект Даннинга-Крюгера — переоценка собственной компетентности',
+            'Эффект якоря — чрезмерная опора на первую полученную информацию',
+            'Аффинити-байас (affinity bias) — неосознанное предпочтение людей с похожим бэкграундом, ценностями или стилем общения',
+            'Эффект ореола — перенос одного позитивного качества на общую оценку',
+        ],
+        'correct': 2,
+        'explanation': (
+            'Аффинити-байас — один из самых распространённых и труднозаметных когнитивных искажений при найме. '
+            'Интервьюер неосознанно оценивает выше тех, кто учился в том же университете, разделяет его хобби '
+            'или говорит в схожем стиле. Результат — снижение разнообразия команд и воспроизводство одних и тех же паттернов.'
+        ),
+        'next_label': 'Финальный вопрос ▶️',
+    },
+    {
+        'title': 'Вопрос 5. Организационная культура',
+        'text': (
+            'Согласно исследованию Eagle Hill Consulting, какая доля сотрудников называет корпоративную '
+            'культуру главным фактором своей удовлетворённости работой?'
+        ),
+        'options': [
+            'Около 20% — большинство людей ставят на первое место зарплату',
+            'Около 45% — примерно половина сотрудников',
+            '73% — корпоративная культура важнее зарплаты и льгот для большинства',
+            'Около 90% — культура абсолютно доминирует над всеми остальными факторами',
+        ],
+        'correct': 2,
+        'explanation': (
+            '73% сотрудников называют корпоративную культуру главным драйвером удовлетворённости. Это важнее, '
+            'чем зарплата, карьерные возможности или гибкий график. Разрыв между декларируемыми ценностями и '
+            'реальными практиками — одна из главных причин, по которым новые сотрудники уходят в первые 90 дней.'
+        ),
+        'next_label': 'К результатам 📊',
+    },
 ]
 
+NUM_EMOJI = ['1️⃣', '2️⃣', '3️⃣', '4️⃣']
+
 COMPLETED_USERS_FILE = 'completed_users.txt'
+
 
 def has_user_completed(user_id):
     if not os.path.exists(COMPLETED_USERS_FILE):
@@ -41,173 +175,297 @@ def has_user_completed(user_id):
         completed = set(line.strip() for line in f)
     return str(user_id) in completed
 
+
 def mark_user_completed(user_id):
     with open(COMPLETED_USERS_FILE, 'a') as f:
         f.write(f'{user_id}\n')
 
+
+def quiz_score(context: ContextTypes.DEFAULT_TYPE) -> int:
+    answers = context.user_data.get('answers', {})
+    return sum(POINTS_PER_CORRECT for ok in answers.values() if ok)
+
+
+def total_score(context: ContextTypes.DEFAULT_TYPE) -> int:
+    bonus = POINTS_FOR_SUBSCRIPTION if context.user_data.get('subscribed') else 0
+    return quiz_score(context) + bonus
+
+
+def render_question(q_index: int) -> str:
+    q = QUIZ_QUESTIONS[q_index]
+    options = '\n'.join(f'{NUM_EMOJI[i]} {opt}' for i, opt in enumerate(q['options']))
+    return f'<b>{q["title"]}</b>\n\n{q["text"]}\n\n{options}'
+
+
+def question_keyboard(q_index: int) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(NUM_EMOJI[i], callback_data=f'ans:{q_index}:{i}')
+        for i in range(len(QUIZ_QUESTIONS[q_index]['options']))
+    ]
+    # Две кнопки в ряд
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
+# --- Обработчики ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if has_user_completed(update.message.from_user.id):
-        await update.message.reply_text('👋 Вы уже прошли этот опрос. Спасибо за участие!')
+    user = update.message.from_user
+    if has_user_completed(user.id):
+        await update.message.reply_text('👋 Вы уже участвовали в квизе. Спасибо! Удачи в розыгрыше 🍀')
         return ConversationHandler.END
 
-    contact_button = KeyboardButton(text='📱 Поделиться контактом', request_contact=True)
-    custom_keyboard = [[contact_button]]
-    reply_markup = ReplyKeyboardMarkup(custom_keyboard, resize_keyboard=True, one_time_keyboard=True)
+    context.user_data.clear()
+    context.user_data['answers'] = {}
 
-    await update.message.reply_text(
-        '👋 Добро пожаловать в TalentMind!\n\n'
-        'Пройдите короткий опрос из 5 вопросов и получите:\n\n'
-        '📊 расчет потерь вашей компании от ошибок найма\n'
-        '📈 сводную HR-аналитику в среднем по рынку\n'
-        '🎁 участие в нашем розыгрыше!\n\n'
-        'Это займет не более 2 минут.\n\n'
-        'Для начала, пожалуйста, поделитесь своим контактом, нажав на кнопку ниже.',
-        reply_markup=reply_markup
+    text = (
+        'Готовы проверить свою HR-интуицию? 🧠\n\n'
+        'Пройдите наш квиз из 5 вопросов об ИИ в рекрутинге и выиграйте приз!\n\n'
+        '<b>Правила просты:</b>\n'
+        '• Отвечайте на 5 вопросов.\n'
+        f'• За каждый правильный ответ — {POINTS_PER_CORRECT} баллов.\n'
+        f'• Подпишитесь на наш канал и получите ещё {POINTS_FOR_SUBSCRIPTION} баллов.\n\n'
+        f'Для участия в розыгрыше приза нужно набрать {WINNING_THRESHOLD} баллов и более.'
     )
-    return CONTACT
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('🚀 Начать квиз', callback_data='start_quiz')]])
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+    return QUIZ
 
-async def process_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    contact = update.message.contact
-    if not contact:
-        await update.message.reply_text('Пожалуйста, используйте кнопку для отправки контакта.')
-        return CONTACT
-        
-    context.user_data['phone'] = contact.phone_number
-    context.user_data['first_name'] = contact.first_name
-    context.user_data['last_name'] = contact.last_name or ''
 
-    await update.message.reply_text(
-        f'Спасибо, {contact.first_name}!\n\n{QUESTIONS[0]}',
-        reply_markup=ReplyKeyboardRemove()
+async def on_start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data.setdefault('answers', {})
+    await query.edit_message_text(
+        render_question(0),
+        reply_markup=question_keyboard(0),
+        parse_mode='HTML',
     )
-    return Q1
+    return QUIZ
 
-async def process_q1(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['q1'] = update.message.text
-    await update.message.reply_text(QUESTIONS[1])
-    return Q2
 
-async def process_q2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['q2'] = update.message.text
-    await update.message.reply_text(QUESTIONS[2])
-    return Q3
+async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    _, q_str, opt_str = query.data.split(':')
+    q_index, chosen = int(q_str), int(opt_str)
+    answers = context.user_data.setdefault('answers', {})
 
-async def process_q3(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['q3'] = update.message.text
-    await update.message.reply_text(QUESTIONS[3])
-    return Q4
+    if q_index in answers:
+        # Уже отвечали на этот вопрос — игнорируем повторное нажатие
+        await query.answer('Вы уже ответили на этот вопрос')
+        return QUIZ
 
-async def process_q4(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['q4'] = update.message.text
-    await update.message.reply_text(QUESTIONS[4])
-    return Q5
+    q = QUIZ_QUESTIONS[q_index]
+    is_correct = chosen == q['correct']
+    answers[q_index] = is_correct
+    await query.answer('Верно! +20' if is_correct else 'Неверно')
 
-async def process_q5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    q5_answer = update.message.text
-    context.user_data['q5'] = q5_answer
-    
-    processing_msg = await update.message.reply_text('⏳ Отлично! Анализируем данные...')
-
-    def parse_float(val):
-        try:
-            val = val.replace(',', '.').replace(' ', '').replace(' ', '').strip()
-            # Извлекаем первое попавшееся число из строки
-            import re
-            m = re.search(r'\d+(?:\.\d+)?', val)
-            if m:
-                return float(m.group(0))
-            return 0.0
-        except:
-            return 0.0
-
-    plan = parse_float(context.user_data.get('q1', '0'))
-    salary_rub = parse_float(context.user_data.get('q2', '0'))
-    probation = parse_float(context.user_data.get('q3', '0'))
-    hiring_cost_rub = parse_float(context.user_data.get('q4', '0'))
-    turnover_rate = parse_float(context.user_data.get('q5', '0'))
-
-    # Расчёты
-    cost_mistake_rub = (salary_rub * probation) + hiring_cost_rub
-    cost_now_rub = plan * (turnover_rate / 100.0) * cost_mistake_rub
-    cost_after_rub = plan * ((turnover_rate / 100.0) * 0.70) * cost_mistake_rub
-    savings_rub = cost_now_rub - cost_after_rub
-    savings_pct = 30.0 if cost_now_rub > 0 else 0.0
-
-    # Форматирование чисел
-    def fmt(num):
-        return f'{num:,.0f}'.replace(',', ' ')
-
-    comp_now_pct = abs(cost_now_rub - 2500000) / 2500000 * 100
-    comp_now = "выше" if cost_now_rub > 2500000 else "ниже"
-
-    comp_mistake_pct = abs(cost_mistake_rub - 250000) / 250000 * 100
-    comp_mistake = "выше" if cost_mistake_rub > 250000 else "ниже"
-
-    result_text = (
-        f'📊 <b>Ваша персональная HR-аналитика:</b>\n\n'
-        f'💸 <b>Стоимость одной ошибки найма:</b>\n'
-        f'{fmt(cost_mistake_rub)} ₽\n'
-        f'<i>что {comp_mistake} на {comp_mistake_pct:.0f}% чем среднее рыночное значение</i>\n\n'
-        f'📉 <b>Текущие годовые потери компании:</b>\n'
-        f'{fmt(cost_now_rub)} ₽\n'
-        f'<i>что {comp_now} на {comp_now_pct:.0f}% чем среднее рыночное значение</i>\n\n'
+    verdict = (
+        f'✅ <b>Верно!</b> (+{POINTS_PER_CORRECT} баллов)'
+        if is_correct
+        else '❌ <b>Неверно.</b> (+0 баллов)'
     )
+    correct_opt = q['options'][q['correct']]
+    body = (
+        f'{render_question(q_index)}\n\n'
+        f'{verdict}\n'
+        f'Правильный ответ: {q["correct"] + 1}. {correct_opt}\n\n'
+        f'💡 {q["explanation"]}'
+    )
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(q['next_label'], callback_data=f'next:{q_index}')]]
+    )
+    await query.edit_message_text(body, reply_markup=keyboard, parse_mode='HTML')
+    return QUIZ
 
+
+async def on_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    q_index = int(query.data.split(':')[1])
+
+    next_index = q_index + 1
+    if next_index < len(QUIZ_QUESTIONS):
+        await query.edit_message_text(
+            render_question(next_index),
+            reply_markup=question_keyboard(next_index),
+            parse_mode='HTML',
+        )
+        return QUIZ
+
+    # Квиз завершён — промежуточный итог
+    score = quiz_score(context)
+    text = (
+        'Отличная работа! Квиз пройден. 🎯\n\n'
+        f'<b>Ваш результат — {score} баллов</b>\n\n'
+        f'Чтобы принять участие в розыгрыше приза, вам необходимо преодолеть порог в {WINNING_THRESHOLD} баллов.\n'
+        'Для этого нужно подписаться на наш Telegram-канал TalentMind и получить +50 баллов.'
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton('📢 Подписаться на канал', url=CHANNEL_URL)],
+        [InlineKeyboardButton('🔄 Проверить подписку', callback_data='check_sub')],
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+    return SUBSCRIBE
+
+
+async def is_subscribed(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
-        await processing_msg.delete()
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        return member.status in ('member', 'administrator', 'creator', 'owner')
+    except Exception as e:
+        logger.error(f'Ошибка проверки подписки на {CHANNEL_USERNAME}: {e}')
+        return False
+
+
+async def on_check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    user_id = query.from_user.id
+    subscribed = await is_subscribed(context, user_id)
+
+    if subscribed:
+        context.user_data['subscribed'] = True
+        await query.answer('Подписка подтверждена!')
+        total = total_score(context)
+        text = (
+            f'✅ Успешно! Подписка подтверждена. Вам начислено {POINTS_FOR_SUBSCRIPTION} баллов.\n\n'
+            f'<b>Ваш итоговый счёт: {total} баллов</b>'
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton('✅ Подтверждаю участие в розыгрыше', callback_data='confirm_draw')]]
+        )
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+        return SUBSCRIBE
+
+    await query.answer('Подписка не найдена', show_alert=True)
+    text = (
+        '⚠️ Мы не нашли вашу подписку на канал. Пожалуйста, подпишитесь, чтобы забрать '
+        f'{POINTS_FOR_SUBSCRIPTION} баллов и принять участие в розыгрыше приза.'
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton('📢 Подписаться на канал', url=CHANNEL_URL)],
+        [InlineKeyboardButton('🔄 Проверить подписку', callback_data='check_sub')],
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+    return SUBSCRIBE
+
+
+async def on_confirm_draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    # Убираем инлайн-кнопку у предыдущего сообщения
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    with open('слайд.png', 'rb') as photo:
-        await update.message.reply_photo(photo=photo, caption=result_text, parse_mode='HTML')
+    contact_button = KeyboardButton(text='📱 Отправить контакт', request_contact=True)
+    keyboard = ReplyKeyboardMarkup(
+        [[contact_button], [KeyboardButton(EMAIL_BUTTON_TEXT)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await query.message.reply_text(
+        'Отлично! Чтобы мы могли связаться с вами и отправить материалы, '
+        'пожалуйста, поделитесь своим номером телефона.\n\n'
+        'Нажмите на кнопку «📱 Отправить контакт» ⬇️\n\n'
+        'Либо выберите «✉️ Указать email вместо этого».',
+        reply_markup=keyboard,
+    )
+    return CONTACT
+
+
+async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contact = update.message.contact
+    context.user_data['phone'] = contact.phone_number
+    context.user_data['first_name'] = contact.first_name or update.message.from_user.first_name or ''
+    context.user_data['last_name'] = contact.last_name or ''
+    return await finalize(update, context)
+
+
+async def on_contact_reprompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        'Пожалуйста, нажмите кнопку «📱 Отправить контакт» внизу экрана '
+        'или выберите «✉️ Указать email вместо этого».'
+    )
+    return CONTACT
+
+
+async def on_use_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        'Пожалуйста, введите ваш email, чтобы мы отправили материалы.',
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return EMAIL
+
+
+async def on_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    email = update.message.text.strip()
+    if not EMAIL_RE.match(email):
+        await update.message.reply_text('Это не похоже на email. Попробуйте ещё раз, например: name@company.ru')
+        return EMAIL
+    context.user_data['email'] = email
+    context.user_data.setdefault('first_name', update.message.from_user.first_name or '')
+    return await finalize(update, context)
+
+
+async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.message
+    user = message.from_user
+
+    congrats = (
+        f'🎉 Поздравляем! Вы зарегистрированы в розыгрыше приза. Он состоится {EVENT_INFO}. Удачи!\n\n'
+        'А пока мы подготовили для вас полезные материалы:\n\n'
+        '🧮 <b>Калькулятор стоимости кадровых ошибок</b> — рассчитайте экономию для вашей компании.\n'
+        '📗 <b>Брошюра TalentMind</b> с подробным описанием технологии Culture Scan (во вложении).'
+    )
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton('🧮 Открыть калькулятор', url=CALCULATOR_URL)]]
+    )
+    await message.reply_text(
+        congrats,
+        reply_markup=keyboard,
+        parse_mode='HTML',
+    )
+    # Убираем reply-клавиатуру
+    await message.reply_text('HR-интуиция — хорошо. Данные — лучше. 📊', reply_markup=ReplyKeyboardRemove())
 
     try:
-        with open('HR-СТАТИСТИКА.pdf', 'rb') as pdf:
-            await update.message.reply_document(document=pdf)
+        with open(BROCHURE_FILE, 'rb') as pdf:
+            await message.reply_document(document=pdf)
     except Exception as e:
-        logging.error(f'Ошибка отправки PDF: {e}')
+        logger.error(f'Ошибка отправки брошюры {BROCHURE_FILE}: {e}')
 
+    # Сохраняем лид в Google Таблицу
+    answers = context.user_data.get('answers', {})
     row_data = [
-        context.user_data.get('phone'),
-        context.user_data.get('first_name'),
-        context.user_data.get('last_name'),
-        context.user_data.get('q1'),
-        context.user_data.get('q2'),
-        context.user_data.get('q3'),
-        context.user_data.get('q4'),
-        context.user_data.get('q5'),
-        cost_mistake_rub,
-        cost_now_rub,
-        cost_after_rub,
-        savings_rub
-    ]
+        context.user_data.get('first_name', ''),
+        context.user_data.get('last_name', ''),
+        f'@{user.username}' if user.username else '',
+        context.user_data.get('phone', ''),
+        context.user_data.get('email', ''),
+        quiz_score(context),
+        'да' if context.user_data.get('subscribed') else 'нет',
+        total_score(context),
+    ] + [('верно' if answers.get(i) else 'неверно') for i in range(len(QUIZ_QUESTIONS))]
 
     try:
         await append_row(GOOGLE_CREDENTIALS_FILE, SPREADSHEET_URL, row_data)
-        mark_user_completed(update.message.from_user.id)
-        await update.message.reply_text(
-            '🎉 <b>Спасибо!</b>\n\n'
-            'Ваши данные успешно сохранены.\n'
-            '🍀 <b>Вы стали участником розыгрыша от TalentMind!</b>\n\n'
-            '📌 <b>Условия участия:</b>\n'
-            '• Быть подписанным на Telegram-канал TalentMind\n'
-            '• Указать корректные контакты\n'
-            'Победители будут определены случайным образом, результаты опубликуем в канале. Удачи!',
-            parse_mode='HTML'
-        )
     except Exception as e:
         import traceback
-        logging.error(f'Ошибка при записи в Google табличку: {e}')
-        logging.error(traceback.format_exc())
-        await update.message.reply_text('Произошла ошибка при сохранении в Google Таблицу.')
+        logger.error(f'Ошибка при записи в Google Таблицу: {e}')
+        logger.error(traceback.format_exc())
 
+    mark_user_completed(user.id)
     context.user_data.clear()
     return ConversationHandler.END
+
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text('Опрос отменен.', reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text('Квиз отменён. Чтобы начать заново, отправьте /start.', reply_markup=ReplyKeyboardRemove())
     context.user_data.clear()
     return ConversationHandler.END
+
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -215,19 +473,32 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            CONTACT: [MessageHandler(filters.CONTACT, process_contact),
-                      MessageHandler(filters.TEXT & ~filters.COMMAND, process_contact)],
-            Q1: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q1)],
-            Q2: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q2)],
-            Q3: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q3)],
-            Q4: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q4)],
-            Q5: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_q5)],
+            QUIZ: [
+                CallbackQueryHandler(on_start_quiz, pattern='^start_quiz$'),
+                CallbackQueryHandler(on_answer, pattern='^ans:'),
+                CallbackQueryHandler(on_next, pattern='^next:'),
+            ],
+            SUBSCRIBE: [
+                CallbackQueryHandler(on_check_sub, pattern='^check_sub$'),
+                CallbackQueryHandler(on_confirm_draw, pattern='^confirm_draw$'),
+            ],
+            CONTACT: [
+                MessageHandler(filters.CONTACT, on_contact),
+                MessageHandler(filters.Regex(f'^{re.escape(EMAIL_BUTTON_TEXT)}$'), on_use_email),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, on_contact_reprompt),
+            ],
+            EMAIL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, on_email),
+            ],
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)],
     )
 
     app.add_handler(conv_handler)
+
+    print('Бот успешно запущен и готов к работе!')
     app.run_polling()
+
 
 if __name__ == '__main__':
     main()
