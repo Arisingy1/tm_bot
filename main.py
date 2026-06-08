@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from telegram import (
     Update,
@@ -40,6 +41,9 @@ CHANNEL_URL = os.getenv('CHANNEL_URL', 'https://t.me/talentmind')  # ссылк�
 CALCULATOR_URL = os.getenv('CALCULATOR_URL', 'https://talentmind.ru/calculator')
 BROCHURE_FILE = os.getenv('BROCHURE_FILE', 'HR-СТАТИСТИКА.pdf')
 EVENT_INFO = os.getenv('EVENT_INFO', '19 июня в 15:00 на стенде TalentMind')
+
+# Московское время для отметок времени в Google Таблице
+MSK = timezone(timedelta(hours=3))
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -199,9 +203,25 @@ def mark_user_completed(user_id):
         f.write(f'{user_id}\n')
 
 
+def is_answer_correct(q_index: int, chosen: int) -> bool:
+    return chosen == QUIZ_QUESTIONS[q_index]['correct']
+
+
 def quiz_score(context: ContextTypes.DEFAULT_TYPE) -> int:
+    # answers: {q_index: chosen_option_index}
     answers = context.user_data.get('answers', {})
-    return sum(POINTS_PER_CORRECT for ok in answers.values() if ok)
+    return sum(
+        POINTS_PER_CORRECT
+        for q_index, chosen in answers.items()
+        if is_answer_correct(q_index, chosen)
+    )
+
+
+def answer_cell(q_index: int, chosen: int) -> str:
+    """Готовит ячейку для Google Таблицы: выбранный вариант + вердикт."""
+    label = SHORT_LABELS[q_index][chosen]
+    verdict = 'верно' if is_answer_correct(q_index, chosen) else 'неверно'
+    return f'{chosen + 1}. {label} ({verdict})'
 
 
 def total_score(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -244,10 +264,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         '• Отвечайте на 5 вопросов.\n'
         f'• За каждый правильный ответ — {POINTS_PER_CORRECT} баллов.\n'
         f'• Подпишитесь на наш канал и получите ещё {POINTS_FOR_SUBSCRIPTION} баллов.\n\n'
-        f'Для участия в розыгрыше приза нужно набрать {WINNING_THRESHOLD} баллов и более.'
+        f'Для участия в розыгрыше приза нужно набрать {WINNING_THRESHOLD} баллов и более.\n\n'
+        'Для начала, пожалуйста, поделитесь контактом — нажмите кнопку ниже ⬇️'
+    )
+    contact_button = KeyboardButton(text='📱 Поделиться контактом', request_contact=True)
+    keyboard = ReplyKeyboardMarkup(
+        [[contact_button], [KeyboardButton(EMAIL_BUTTON_TEXT)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+    return CONTACT
+
+
+async def begin_quiz(message, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Контакт получен — убираем reply-клавиатуру и предлагаем начать квиз."""
+    name = context.user_data.get('first_name') or ''
+    await message.reply_text(
+        f'Спасибо{", " + name if name else ""}! Контакт получен ✅',
+        reply_markup=ReplyKeyboardRemove(),
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('🚀 Начать квиз', callback_data='start_quiz')]])
-    await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+    await message.reply_text(
+        'Нажмите кнопку, чтобы начать квиз из 5 вопросов.',
+        reply_markup=keyboard,
+    )
     return QUIZ
 
 
@@ -286,7 +327,7 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     q = QUIZ_QUESTIONS[q_index]
     is_correct = chosen == q['correct']
-    answers[q_index] = is_correct
+    answers[q_index] = chosen  # храним выбранный вариант, корректность считаем по нему
     await query.answer('Верно! +20' if is_correct else 'Неверно')
 
     verdict = (
@@ -383,28 +424,14 @@ async def on_check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def on_confirm_draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Контакт уже получен в начале — сразу выдаём материалы и сохраняем данные
     query = update.callback_query
     await query.answer()
-    # Убираем инлайн-кнопку у предыдущего сообщения
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
         pass
-
-    contact_button = KeyboardButton(text='📱 Отправить контакт', request_contact=True)
-    keyboard = ReplyKeyboardMarkup(
-        [[contact_button], [KeyboardButton(EMAIL_BUTTON_TEXT)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await query.message.reply_text(
-        'Отлично! Чтобы мы могли связаться с вами и отправить материалы, '
-        'пожалуйста, поделитесь своим номером телефона.\n\n'
-        'Нажмите на кнопку «📱 Отправить контакт» ⬇️\n\n'
-        'Либо выберите «✉️ Указать email вместо этого».',
-        reply_markup=keyboard,
-    )
-    return CONTACT
+    return await finalize(query.message, query.from_user, context)
 
 
 async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -412,12 +439,12 @@ async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['phone'] = contact.phone_number
     context.user_data['first_name'] = contact.first_name or update.message.from_user.first_name or ''
     context.user_data['last_name'] = contact.last_name or ''
-    return await finalize(update, context)
+    return await begin_quiz(update.message, context)
 
 
 async def on_contact_reprompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        'Пожалуйста, нажмите кнопку «📱 Отправить контакт» внизу экрана '
+        'Пожалуйста, нажмите кнопку «📱 Поделиться контактом» внизу экрана '
         'или выберите «✉️ Указать email вместо этого».'
     )
     return CONTACT
@@ -425,7 +452,7 @@ async def on_contact_reprompt(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def on_use_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        'Пожалуйста, введите ваш email, чтобы мы отправили материалы.',
+        'Пожалуйста, введите ваш email, чтобы мы могли связаться с вами.',
         reply_markup=ReplyKeyboardRemove(),
     )
     return EMAIL
@@ -438,13 +465,10 @@ async def on_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return EMAIL
     context.user_data['email'] = email
     context.user_data.setdefault('first_name', update.message.from_user.first_name or '')
-    return await finalize(update, context)
+    return await begin_quiz(update.message, context)
 
 
-async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    message = update.message
-    user = message.from_user
-
+async def finalize(message, user, context: ContextTypes.DEFAULT_TYPE) -> int:
     congrats = (
         f'🎉 Поздравляем! Вы зарегистрированы в розыгрыше приза. Он состоится {EVENT_INFO}. Удачи!\n\n'
         'А пока мы подготовили для вас полезные материалы:\n\n'
@@ -454,13 +478,8 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton('🧮 Открыть калькулятор', url=CALCULATOR_URL)]]
     )
-    await message.reply_text(
-        congrats,
-        reply_markup=keyboard,
-        parse_mode='HTML',
-    )
-    # Убираем reply-клавиатуру
-    await message.reply_text('HR-интуиция — хорошо. Данные — лучше. 📊', reply_markup=ReplyKeyboardRemove())
+    await message.reply_text(congrats, reply_markup=keyboard, parse_mode='HTML')
+    await message.reply_text('HR-интуиция — хорошо. Данные — лучше. 📊')
 
     try:
         with open(BROCHURE_FILE, 'rb') as pdf:
@@ -468,21 +487,28 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     except Exception as e:
         logger.error(f'Ошибка отправки брошюры {BROCHURE_FILE}: {e}')
 
-    # Сохраняем лид в Google Таблицу
+    # Сохраняем все данные участника в Google Таблицу:
+    # время, контакты, ответ по каждому вопросу, баллы за квиз, подписку и итог
     answers = context.user_data.get('answers', {})
     row_data = [
+        datetime.now(MSK).strftime('%d.%m.%Y %H:%M'),
         context.user_data.get('first_name', ''),
         context.user_data.get('last_name', ''),
         f'@{user.username}' if user.username else '',
         context.user_data.get('phone', ''),
         context.user_data.get('email', ''),
+    ] + [
+        answer_cell(i, answers[i]) if i in answers else '—'
+        for i in range(len(QUIZ_QUESTIONS))
+    ] + [
         quiz_score(context),
         'да' if context.user_data.get('subscribed') else 'нет',
         total_score(context),
-    ] + [('верно' if answers.get(i) else 'неверно') for i in range(len(QUIZ_QUESTIONS))]
+    ]
 
     try:
         await append_row(GOOGLE_CREDENTIALS_FILE, SPREADSHEET_URL, row_data)
+        logger.info(f'Записан лид: {row_data}')
     except Exception as e:
         import traceback
         logger.error(f'Ошибка при записи в Google Таблицу: {e}')
