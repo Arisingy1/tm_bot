@@ -173,6 +173,16 @@ QUIZ_QUESTIONS = [
     },
 ]
 
+# Короткие подписи для кнопок (полный текст вариантов — в сообщении).
+# Кнопки в Telegram не переносят строки, поэтому подписи делаем компактными.
+SHORT_LABELS = [
+    ['Около 10%', 'Около 25%', 'Около 44%', 'Более 80%'],
+    ['Около 5–10%', 'Около 15–20%', '50–200%', 'Более 500%'],
+    ['Около 10%', 'Около 25%', 'Около 50%', 'Более 80%'],
+    ['Даннинг-Крюгер', 'Эффект якоря', 'Аффинити-байас', 'Эффект ореола'],
+    ['Около 20%', 'Около 45%', '73%', 'Около 90%'],
+]
+
 COMPLETED_USERS_FILE = 'completed_users.txt'
 
 
@@ -201,16 +211,18 @@ def total_score(context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def render_question(q_index: int) -> str:
     q = QUIZ_QUESTIONS[q_index]
-    return f'<b>{q["title"]}</b>\n\n{q["text"]}'
+    options = '\n'.join(f'{i + 1}. {opt}' for i, opt in enumerate(q['options']))
+    return f'<b>{q["title"]}</b>\n\n{q["text"]}\n\n{options}'
 
 
 def question_keyboard(q_index: int) -> InlineKeyboardMarkup:
-    # Каждый вариант ответа — отдельная кнопка с полным текстом
-    q = QUIZ_QUESTIONS[q_index]
-    rows = [
-        [InlineKeyboardButton(opt, callback_data=f'ans:{q_index}:{i}')]
-        for i, opt in enumerate(q['options'])
+    # Полный текст вариантов — в сообщении; на кнопках — короткие подписи (по 2 в ряд)
+    labels = SHORT_LABELS[q_index]
+    buttons = [
+        InlineKeyboardButton(f'{i + 1}. {labels[i]}', callback_data=f'ans:{q_index}:{i}')
+        for i in range(len(labels))
     ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     return InlineKeyboardMarkup(rows)
 
 
