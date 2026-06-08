@@ -251,15 +251,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return QUIZ
 
 
+async def send_question(message, q_index: int) -> None:
+    """Отправляет вопрос отдельным НОВЫМ сообщением (история чата сохраняется)."""
+    await message.reply_text(
+        render_question(q_index),
+        reply_markup=question_keyboard(q_index),
+        parse_mode='HTML',
+    )
+
+
 async def on_start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     context.user_data.setdefault('answers', {})
-    await query.edit_message_text(
-        render_question(0),
-        reply_markup=question_keyboard(0),
-        parse_mode='HTML',
-    )
+    # Убираем кнопку «Начать квиз» у приветствия, но само сообщение оставляем в истории
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await send_question(query.message, 0)
     return QUIZ
 
 
@@ -284,11 +294,12 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if is_correct
         else '❌ <b>Неверно.</b> (+0 баллов)'
     )
-    correct_opt = q['options'][q['correct']]
+    # Сообщение с вопросом превращается в постоянную запись: вопрос + ваш ответ + пояснение
     body = (
         f'{render_question(q_index)}\n\n'
         f'{verdict}\n'
-        f'Правильный ответ: {q["correct"] + 1}. {correct_opt}\n\n'
+        f'Ваш ответ: {chosen + 1}. {q["options"][chosen]}\n'
+        f'Правильный ответ: {q["correct"] + 1}. {q["options"][q["correct"]]}\n\n'
         f'💡 {q["explanation"]}'
     )
     keyboard = InlineKeyboardMarkup(
@@ -303,16 +314,18 @@ async def on_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
     q_index = int(query.data.split(':')[1])
 
+    # Замораживаем запись по текущему вопросу: убираем кнопку «Далее», но сообщение остаётся в истории
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
     next_index = q_index + 1
     if next_index < len(QUIZ_QUESTIONS):
-        await query.edit_message_text(
-            render_question(next_index),
-            reply_markup=question_keyboard(next_index),
-            parse_mode='HTML',
-        )
+        await send_question(query.message, next_index)
         return QUIZ
 
-    # Квиз завершён — промежуточный итог
+    # Квиз завершён — промежуточный итог отдельным сообщением
     score = quiz_score(context)
     text = (
         'Отличная работа! Квиз пройден. 🎯\n\n'
@@ -324,7 +337,7 @@ async def on_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton('📢 Подписаться на канал', url=CHANNEL_URL)],
         [InlineKeyboardButton('🔄 Проверить подписку', callback_data='check_sub')],
     ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+    await query.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
     return SUBSCRIBE
 
 
